@@ -1,7 +1,7 @@
 # sd-webui-flash-attention-zluda-win
 A flash attention extension for stable diffusion webui with AMD ZLUDA (gfx11xx, Windows) environments.
 
-一个用于stable diffusion webui 为 AMD GPU Windows ZLUDA 环境的Flash attention优化方案扩展插件
+一个为 AMD GPU Windows ZLUDA 环境提供Flash attention优化方案的stable diffusion webui扩展插件
 
 ## 
 目前仅支持 RX7000 系显卡和 Python 3.10 + Pytorch 2.2.1 + CUDA 11.8 环境 
