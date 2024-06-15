@@ -11,6 +11,11 @@ Currently only supports RX7000, Python 3.10 + Pytorch 2.2.1 + CUDA 11.8
 Flash attention 编译自： Flash attention Compiled From:
 [https://github.com/ROCm/flash-attention/blob/howiejay/navi_support](https://github.com/ROCm/flash-attention/tree/howiejay/navi_support)
 
+### 其它限制 (Limitations)
+无法计算大于128 dimsize的张量，对应SD1.5模型则回落至Sub-quad算法处理（约占总计算量的37%），SDXL未发现该问题
+
+Unable to compute tensors larger than 128 dimsize, the SD1.5 model would falls back to the Sub-quad (about 37% of the total computation)
+
 ## 使用方法 (How to use)
 
 1.从本仓库安装插件。 Install extensions from this repository.
