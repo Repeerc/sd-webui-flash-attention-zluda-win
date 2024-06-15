@@ -25,6 +25,9 @@ Unable to compute tensors larger than 128 dimsize, the SD1.5 model would falls b
 
 ## 测试 (Testing)
 
+GPU: AMD RX7900 XTX 24GB
+CPU: Intel 13900T
+
 Launching arguments with: --medvram-sdxl 
 
 SD1.5 Model:cuteyukimixAdorable_neochapter[6ee4f31532], VAE:vae-ft-mse-840000-ema-pruned
