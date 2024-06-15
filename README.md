@@ -3,10 +3,9 @@ A flash attention extension for stable diffusion webui with AMD ZLUDA (gfx11xx, 
 
 一个为 AMD GPU Windows ZLUDA 环境提供Flash attention优化方案的stable diffusion webui扩展插件
 
-## 
-目前仅支持 RX7000 系显卡和 Python 3.10 + Pytorch 2.2.1 + CUDA 11.8 环境 
 
-Currently only supports RX7000, Python 3.10 + Pytorch 2.2.1 + CUDA 11.8
+# 目前仅支持 RX7000 系显卡和 Python 3.10 + PyTorch 2.2.1 + CUDA 11.8 环境
+# Currently only supports RX7000, Python 3.10 + Pytorch 2.2.1 + CUDA 11.8
 
 Flash attention 编译自： Flash attention Compiled From:
 [https://github.com/ROCm/flash-attention/blob/howiejay/navi_support](https://github.com/ROCm/flash-attention/tree/howiejay/navi_support)
