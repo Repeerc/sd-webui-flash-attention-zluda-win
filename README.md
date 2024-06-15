@@ -9,7 +9,7 @@ A flash attention extension for stable diffusion webui with AMD ZLUDA (gfx11xx, 
 Currently only supports RX7000, Python 3.10 + Pytorch 2.2.1 + CUDA 11.8
 
 Flash attention 编译自： Flash attention Compiled From:
-https://github.com/ROCm/flash-attention/blob/howiejay/navi_support
+[https://github.com/ROCm/flash-attention/blob/howiejay/navi_support](https://github.com/ROCm/flash-attention/tree/howiejay/navi_support)
 
 ## 使用方法 (How to use)
 
