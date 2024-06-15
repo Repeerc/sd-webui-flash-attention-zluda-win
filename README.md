@@ -39,7 +39,7 @@ Clip skip:2
 Tile VAE: Encoder Tile Size = 1536, Decoder Tile Size = 128
 
 ### SDXL
-DPM++, 2M, 1024x1024, 50 Steps, BatchSize = 2
+DPM++, 2M, 1024x1024, 50 Steps, BatchSize = 1
 |   | Pytorch SDP  | Flash Attention |       |
 |:---------:|--------:|--------:|--------:|
 | Speed | 2.71 it/s  |  3.10 it/s |  |
