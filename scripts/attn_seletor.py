@@ -3,14 +3,19 @@ import contextlib
 from einops import rearrange
 import gradio as gr
 from ldm.util import default
-from modules import scripts
+
+from modules import scripts, sd_hijack
 from modules import shared, errors, devices, sub_quadratic_attention
+from modules import sd_hijack_unet
 from modules.hypernetworks import hypernetwork
+from modules.sd_hijack import undo_optimizations
 from modules.sd_hijack_optimizations import (
+    SdOptimization,
     list_optimizers,
-    sub_quad_attention_forward,
     sub_quad_attnblock_forward,
 )
+
+from torch.nn.functional import silu
 
 import ldm.modules.attention
 import ldm.modules.diffusionmodules.model
@@ -22,30 +27,15 @@ import torch
 import os
 
 os.add_dll_directory(os.path.join(os.environ["HIP_PATH"], "bin"))
-from scripts.ck_mha import minimal_attn
+from scripts.fattn_kernel import flash_attn_wmma
 
-large_d = 0
-small_d = 0
+flash_attn_name = "Flash Attention v2 (wmma)"
 
-ck_tile_attn_name = "Flash Attention (ck_tile) [ZLUDA]"
-
-def ck_tile_attention_forward(self, x, context=None, mask=None, **kwargs):
-    global large_d, small_d
+def flash_attention_forward(self, x, context=None, mask=None, **kwargs):
 
     h = self.heads
     q_in = self.to_q(x)
-
-
-    if (q_in.shape[-1] // h) > 128:
-        large_d += 1
-        if large_d % 32 == 0:
-            print(
-                f"Tensor dimsize {q_in.shape[-1]//h} over 128, fallback Sub-Quad...",
-                large_d / (large_d + small_d),
-            )
-        del q_in
-        return sub_quad_attention_forward(self, x, context, mask)
-    
+   
     context = default(context, x)
     context_k, context_v = hypernetwork.apply_hypernetworks(
         shared.loaded_hypernetworks, context
@@ -53,60 +43,75 @@ def ck_tile_attention_forward(self, x, context=None, mask=None, **kwargs):
     
     k_in = self.to_k(context_k)
     v_in = self.to_v(context_v)
-    small_d += 1
-
-    q, k, v = (rearrange(t, "b n (h d) -> b n h d", h=h) for t in (q_in, k_in, v_in))
+    
+    q, k, v = (rearrange(t, "b n (h d) -> b h n d", h=h) for t in (q_in, k_in, v_in))
     del q_in, k_in, v_in
 
     dtype = q.dtype
 
-    q, k, v = q.to(torch.float16), k.to(torch.float16), v.to(torch.float16)
+    q, k, v = q.contiguous().to(torch.float16), k.contiguous().to(torch.float16), v.contiguous().to(torch.float16)
 
     sc = q.shape[-1] ** -0.5
-    out = minimal_attn.fwd(q, k, v, None, 0, sc, False, False, None)[0]
+
+    Br = 64
+    Bc = None
+
+    d_qkv = q.shape[-1]
+    d_pad_to = 16
+    d_pad_sz = ((d_qkv + d_pad_to - 1) // d_pad_to) * d_pad_to - d_qkv
+
+    def prev_power_of_2(n: int):
+        i = 1
+        while 2**i < n:
+            i += 1
+        return 2 ** (i - 1)
+
+    n_kv = k.shape[2]
+    if n_kv >= 512:
+        n_pad_to = 512
+        n_pad_sz = ((n_kv + n_pad_to - 1) // n_pad_to) * n_pad_to  - n_kv 
+        Bc = 512
+        Br = 64
+    else:
+        n_pad_to = 16
+        n_pad_sz = ((n_kv + n_pad_to - 1) // n_pad_to) * n_pad_to  - n_kv 
+        Bc = n_pad_sz + n_kv
+        Br = min(prev_power_of_2(32768 // Bc), q.shape[2])
+    
+    k = torch.nn.functional.pad(k, (0, d_pad_sz, n_pad_sz , 0 ,0, 0), mode='constant', value=0) 
+    v = torch.nn.functional.pad(v, (0, d_pad_sz, n_pad_sz , 0 ,0, 0), mode='constant', value=0)     
+    q = torch.nn.functional.pad(q, (0, d_pad_sz, 0 , 0 ,0, 0), mode='constant', value=0) 
+    
+    out = flash_attn_wmma.forward(q, k, v, Br, Bc)[:, :, :, :d_qkv]
 
     out = out.to(dtype)
 
-    out = rearrange(out, "b n h d -> b n (h d)", h=h)
+    out = rearrange(out, "b h n d -> b n (h d)", h=h)
     return self.to_out(out)
 
 
-def ck_tile_attnblock_forward(self, x):
-    global large_d, small_d
+def flash_attnblock_forward(self, x):
 
     try:
         h_ = x
         h_ = self.norm(h_)
         q = self.q(h_)
 
-        if q.shape[1] > 128:
-            large_d += 1
-            if large_d % 32 == 0:
-                print(
-                    f"Tensor dimsize {q.shape[1]} over 128, fallback Sub-Quad... [attnblock]",
-                    large_d / (large_d + small_d),
-                )
-            return sub_quad_attnblock_forward(self, x)
         k = self.k(h_)
         v = self.v(h_)
-        small_d += 1
 
         b, c, h, w = q.shape
         q, k, v = map(
-            lambda t: t.view(b, 1, c, -1).transpose(2, 3),
+            lambda t: t.view(b, 1, c, -1).transpose(2, 3).contiguous(),
             (q, k, v),
         )
 
         dtype = q.dtype
 
         q, k, v = q.to(torch.float16), k.to(torch.float16), v.to(torch.float16)
-
-        q = q.contiguous()
-        k = k.contiguous()
-        v = v.contiguous()
-
+ 
         sc = q.shape[-1] ** -0.5
-        out = minimal_attn.fwd(q, k, v, None, 0, sc, False, False, None)[0]
+        out = flash_attn_wmma.forward(q,k,v,64,128)
 
         out = out.to(dtype)
 
@@ -116,6 +121,73 @@ def ck_tile_attnblock_forward(self, x):
     except:
         return sub_quad_attnblock_forward(self, x)
 
+force_set_optimizer = False
+from modules.sd_hijack import optimizers, current_optimizer
+def apply_optimizations_hijack(option=None):
+    global current_optimizer, optimizers 
+    if force_set_optimizer:
+        print("force applying attention optimization to:", current_optimizer.name)
+        current_optimizer.apply()
+        return current_optimizer.name
+
+    undo_optimizations()
+
+    if len(optimizers) == 0:
+        # a script can access the model very early, and optimizations would not be filled by then
+        current_optimizer = None
+        return ''
+
+    ldm.modules.diffusionmodules.model.nonlinearity = silu
+    ldm.modules.diffusionmodules.openaimodel.th = sd_hijack_unet.th
+
+    sgm.modules.diffusionmodules.model.nonlinearity = silu
+    sgm.modules.diffusionmodules.openaimodel.th = sd_hijack_unet.th
+
+    if current_optimizer is not None:
+        current_optimizer.undo()
+        current_optimizer = None
+
+    selection = option or shared.opts.cross_attention_optimization
+    if selection == "Automatic" and len(optimizers) > 0:
+        matching_optimizer = next(iter([x for x in optimizers if x.cmd_opt and getattr(shared.cmd_opts, x.cmd_opt, False)]), optimizers[0])
+    else:
+        matching_optimizer = next(iter([x for x in optimizers if x.title() == selection]), None)
+
+    if selection == "None":
+        matching_optimizer = None
+    elif selection == "Automatic" and shared.cmd_opts.disable_opt_split_attention:
+        matching_optimizer = None
+    elif matching_optimizer is None:
+        matching_optimizer = optimizers[0]
+
+    if matching_optimizer is not None:
+        print(f"Applying attention optimization: {matching_optimizer.name}... ", end='')
+        matching_optimizer.apply()
+        print("done.")
+        current_optimizer = matching_optimizer
+        return current_optimizer.name
+    else:
+        print("Disabling attention optimization")
+        return ''
+    
+sd_hijack.apply_optimizations = apply_optimizations_hijack
+setattr(sd_hijack,"apply_optimizations", apply_optimizations_hijack)
+
+class SdOptimizationFattn(SdOptimization):
+    name = "flash_attn_v2_rocWMMA"
+    label = "flash attention v2 rocWMMA"
+    cmd_opt = "opt_flash_attention_rocwmma"
+    priority = 80
+
+    def is_available(self):
+        return True
+
+    def apply(self):
+        ldm.modules.attention.CrossAttention.forward = flash_attention_forward
+        ldm.modules.diffusionmodules.model.AttnBlock.forward = flash_attnblock_forward
+        sgm.modules.attention.CrossAttention.forward = flash_attention_forward
+        sgm.modules.diffusionmodules.model.AttnBlock.forward = flash_attnblock_forward
+
 
 class AttentionSelectorPlugin(scripts.Script):
     def __init__(self) -> None:
@@ -124,7 +196,7 @@ class AttentionSelectorPlugin(scripts.Script):
         self.availableSDOptimizations_name = []
         list_optimizers(self.availableSDOptimizations)
 
-        self.availableSDOptimizations_name.append(ck_tile_attn_name)
+        self.availableSDOptimizations_name.append(flash_attn_name)
 
         for n in self.availableSDOptimizations:
             if hasattr(n, "is_available"):
@@ -133,29 +205,26 @@ class AttentionSelectorPlugin(scripts.Script):
             else:
                 self.availableSDOptimizations_name.append(n.name)
 
-    def send_text_to_prompt(self, select_optim):
-
+    def set_optimizer(self, select_optim):
+        global current_optimizer, force_set_optimizer
+        force_set_optimizer = True
         # print(select_optim)
-        if select_optim == ck_tile_attn_name:
-            ldm.modules.attention.CrossAttention.forward = ck_tile_attention_forward
-            ldm.modules.diffusionmodules.model.AttnBlock.forward = (
-                ck_tile_attnblock_forward
-            )
-            sgm.modules.attention.CrossAttention.forward = ck_tile_attention_forward
-            sgm.modules.diffusionmodules.model.AttnBlock.forward = (
-                ck_tile_attnblock_forward
-            )
-            gr.Info(f"Applied attention optimization: {ck_tile_attn_name}")
+        if select_optim == flash_attn_name:
+            flashAttnOptim = SdOptimizationFattn()
+            setattr(shared.cmd_opts, flashAttnOptim.cmd_opt, True)
+            flashAttnOptim.apply()
+            current_optimizer = flashAttnOptim
+            gr.Info(f"Applied attention optimization: {flash_attn_name}")
             return select_optim
 
         for n in self.availableSDOptimizations:
             if n.name == select_optim:
                 print(f"Applying attention optimization: {n.name}... ", end="")
                 n.apply()
+                current_optimizer = n
                 print("done.")
                 gr.Info(f"Applied attention optimization: {n.name}")
                 return select_optim
-
         return select_optim
 
     def title(self):
@@ -174,6 +243,6 @@ class AttentionSelectorPlugin(scripts.Script):
 
         with contextlib.suppress(AttributeError):
             self.send_text_button.click(
-                fn=self.send_text_to_prompt, inputs=[self.types_to_sent]
+                fn=self.set_optimizer, inputs=[self.types_to_sent]
             )
         return [self.send_text_button, self.types_to_sent]
