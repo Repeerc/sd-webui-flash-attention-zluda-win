@@ -32,7 +32,6 @@ SDXL Model:animagineXLV3_v30[1449e5b0b9], VAE:None
 Clip skip:2
 
 ### SDXL
-
 DPM++, 2M, 1024x1024, 50 Steps, BatchSize = 1
 |   | Pytorch SDP  | Flash Attention |       |
 |:---------:|--------:|--------:|--------:|
